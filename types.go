@@ -1,5 +1,18 @@
 package pike
 
+const (
+	NullType    = "null"
+	BooleanType = "boolean"
+	IntType     = "int"
+	LongType    = "long"
+	FloatType   = "float"
+	DoubleType  = "double"
+	BytesType   = "bytes"
+	StringType  = "string"
+	ArrayType   = "array"
+	RecordType  = "record"
+)
+
 type MetaData map[string][]byte
 
 type Schema struct {
@@ -27,3 +40,5 @@ type DoubleArray []Double
 type BytesArray []Bytes
 type StringArray []String
 type UnionArray []Union
+
+type Record map[string]interface{}

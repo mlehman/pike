@@ -9,19 +9,23 @@ import (
 )
 
 var (
-	Magic               = [...]byte{'O', 'b', 'j', 0x1}
-	MetaDataCodec       = "avro.codec"
-	MetaDataSchema      = "avro.schema"
-	ErrorNotDataFile    = errors.New("not a data file")
-	ErrorInvalidBoolean = errors.New("invalid value for boolean")
+	Magic                  = []byte{'O', 'b', 'j', 0x1}
+	MetaDataCodec          = "avro.codec"
+	MetaDataSchema         = "avro.schema"
+	ErrorNotDataFile       = errors.New("not a data file")
+	ErrorInvalidBoolean    = errors.New("invalid value for boolean")
+	ErrorInvalidSyncMarker = errors.New("invalid sync marker")
 )
 
 type AvroReader struct {
-	binaryReader BinaryReader
-	MetaData     MetaData
-	Schema       Schema
-	Codec        string
-	SyncMarker   [16]byte
+	binaryReader   BinaryReader
+	MetaData       MetaData
+	Schema         Schema
+	Codec          string
+	SyncMarker     [16]byte
+	blockReader    BinaryReader
+	blockSize      int64
+	blockRemaining int64
 }
 
 func NewReader(br BinaryReader) (ar *AvroReader, err error) {
@@ -30,39 +34,32 @@ func NewReader(br BinaryReader) (ar *AvroReader, err error) {
 	return
 }
 
+func (metaData MetaData) read(r BinaryReader) (err error) {
+	err = readMap(r, new(String), new(Bytes),
+		func(key TypeReader, val TypeReader) {
+			metaData[string(key.value().(String))] = val.value().(Bytes)
+		})
+	return err
+}
+
 func (r *AvroReader) initialize() (err error) {
 	magic := make([]byte, len(Magic), len(Magic))
 	if _, err = io.ReadFull(r.binaryReader, magic); err != nil {
 		return ErrorNotDataFile
 	}
-	for i, v := range magic {
-		if v != Magic[i] {
-			return ErrorNotDataFile
-		}
+	if !eql(magic, Magic) {
+		return ErrorNotDataFile
 	}
 
-	var count Long
-	var key String
-	var val Bytes
-	if err = count.read(r.binaryReader); err != nil {
-		return err
-	}
 	r.MetaData = make(MetaData)
-	for ; count > 0; count-- {
-		if err = key.read(r.binaryReader); err != nil {
-			return err
-		}
-		if err = val.read(r.binaryReader); err != nil {
-			return err
-		}
-		r.MetaData[string(key)] = val
-	}
 
-	syncMarker := make([]byte, len(r.SyncMarker), len(r.SyncMarker))
-	if _, err = io.ReadFull(r.binaryReader, syncMarker); err != nil {
+	if err = r.MetaData.read(r.binaryReader); err != nil {
 		return err
 	}
-	copy(r.SyncMarker[:], syncMarker)
+
+	if err = r.readSyncMarker(r.SyncMarker[:]); err != nil {
+		return err
+	}
 
 	r.Codec = string(r.MetaData[MetaDataCodec])
 	if err = json.Unmarshal(r.MetaData[MetaDataSchema], &r.Schema); err != nil {
@@ -72,8 +69,60 @@ func (r *AvroReader) initialize() (err error) {
 	return
 }
 
-func (r *AvroReader) ReadRecord() (interface{}, error) {
-	return nil, io.EOF
+func eql(a, b []byte) bool {
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *AvroReader) readSyncMarker(out []byte) (err error) {
+	syncMarker := make([]byte, len(r.SyncMarker), len(r.SyncMarker))
+	if _, err = io.ReadFull(r.binaryReader, syncMarker); err == nil {
+		copy(out, syncMarker)
+	}
+	return
+}
+
+func (r *AvroReader) readBlock() (err error) {
+
+	if r.blockSize > 0 {
+		syncMarker := make([]byte, len(r.SyncMarker), len(r.SyncMarker))
+		if err = r.readSyncMarker(syncMarker); err != nil {
+			return err
+		}
+		if !eql(r.SyncMarker[:], syncMarker) {
+			return ErrorInvalidSyncMarker
+		}
+	}
+
+	var count Long
+	if err = count.read(r.binaryReader); err != nil {
+		return err
+	}
+
+	r.blockRemaining = int64(count)
+
+	if err = count.read(r.binaryReader); err != nil {
+		return err
+	}
+	r.blockSize = int64(count)
+
+	r.blockReader = r.binaryReader
+	return
+}
+
+func (r *AvroReader) ReadRecord() (record Record, err error) {
+	if r.blockRemaining == 0 {
+		if err = r.readBlock(); err != nil {
+			return nil, err
+		}
+
+	}
+	r.blockRemaining--
+	return r.Schema.readRecord(r.blockReader)
 }
 
 type BinaryReader interface {
@@ -229,3 +278,49 @@ func (array *StringArray) read(r BinaryReader) (err error) {
 }
 
 func (a *StringArray) value() interface{} { return *a }
+
+func readMap(r BinaryReader, key TypeReader, val TypeReader, add func(TypeReader, TypeReader)) (err error) {
+	var count Long
+	for err = count.read(r); err == nil && count > 0; err = count.read(r) {
+		for ; count > 0; count-- {
+			if err = key.read(r); err != nil {
+				return err
+			}
+			if err = val.read(r); err != nil {
+				return err
+			}
+			add(key, val)
+		}
+	}
+	return err
+}
+
+func (s *Schema) read(r BinaryReader) (val interface{}, err error) {
+	var tr TypeReader
+	switch s.Type {
+	case IntType:
+		tr = new(Int)
+	case LongType:
+		tr = new(Long)
+	case StringType:
+		tr = new(String)
+	default:
+		return val, errors.New("unknown type:" + s.Type)
+	}
+	if err = tr.read(r); err == nil {
+		val = tr.value()
+	}
+	return val, err
+}
+
+func (s *Schema) readRecord(r BinaryReader) (record Record, err error) {
+	record = make(Record)
+	for _, field := range s.Fields {
+		var val interface{}
+		if val, err = field.read(r); err != nil {
+			return record, err
+		}
+		record[field.Name] = val
+	}
+	return
+}
