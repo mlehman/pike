@@ -1,6 +1,7 @@
 package pike
 
 import (
+	"compress/flate"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,8 @@ import (
 var (
 	Magic                  = []byte{'O', 'b', 'j', 0x1}
 	MetaDataCodec          = "avro.codec"
+	CodecNull              = "null"
+	CodecDeflate           = "deflate"
 	MetaDataSchema         = "avro.schema"
 	ErrorNotDataFile       = errors.New("not a data file")
 	ErrorInvalidBoolean    = errors.New("invalid value for boolean")
@@ -110,7 +113,13 @@ func (r *AvroReader) readBlock() (err error) {
 	}
 	r.blockSize = int64(count)
 
-	r.blockReader = r.binaryReader
+	switch r.Codec {
+	case CodecDeflate:
+		r.blockReader = &BinaryReadCloser{flate.NewReader(r.binaryReader)}
+	case CodecNull:
+		r.blockReader = r.binaryReader
+	}
+
 	return
 }
 
@@ -128,6 +137,18 @@ func (r *AvroReader) ReadRecord() (record Record, err error) {
 type BinaryReader interface {
 	io.ByteReader
 	io.Reader
+}
+
+type BinaryReadCloser struct {
+	io.ReadCloser
+}
+
+func (r *BinaryReadCloser) ReadByte() (b byte, err error) {
+	buff := make([]byte, 1)
+	if _, err = io.ReadFull(r, buff); err == nil {
+		b = buff[0]
+	}
+	return
 }
 
 type TypeReader interface {
@@ -197,7 +218,7 @@ func (d *Double) value() interface{} { return *d }
 func (b *Bytes) read(reader BinaryReader) (err error) {
 	var count Long
 	if err = count.read(reader); err == nil {
-		*b = make([]byte, count)
+		*b = make([]byte, count, count)
 		if _, err = io.ReadFull(reader, *b); err != nil {
 			return err
 		}
@@ -297,7 +318,7 @@ func readMap(r BinaryReader, key TypeReader, val TypeReader, add func(TypeReader
 
 func (s *Schema) read(r BinaryReader) (val interface{}, err error) {
 	var tr TypeReader
-	switch s.Type {
+	switch s.Type() {
 	case IntType:
 		tr = new(Int)
 	case LongType:
@@ -305,7 +326,7 @@ func (s *Schema) read(r BinaryReader) (val interface{}, err error) {
 	case StringType:
 		tr = new(String)
 	default:
-		return val, errors.New("unknown type:" + s.Type)
+		return val, errors.New("unknown type:" + s.Type())
 	}
 	if err = tr.read(r); err == nil {
 		val = tr.value()

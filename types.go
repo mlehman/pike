@@ -1,5 +1,7 @@
 package pike
 
+import "fmt"
+
 const (
 	NullType    = "null"
 	BooleanType = "boolean"
@@ -10,16 +12,30 @@ const (
 	BytesType   = "bytes"
 	StringType  = "string"
 	ArrayType   = "array"
+	UnionType   = "union"
 	RecordType  = "record"
 )
 
 type MetaData map[string][]byte
 
 type Schema struct {
-	Type      string   `json:"type"`
-	Name      string   `json:"name,omitempty"`
-	Namespace string   `json:"namespace,omitempty"`
-	Fields    []Schema `json:"fields,omitempty"`
+	SchemaType interface{} `json:"type"` //TODO: Implement json.Unmarshaller
+	Name       string      `json:"name,omitempty"`
+	Namespace  string      `json:"namespace,omitempty"`
+	Doc        string      `json:"doc,omitempty"`
+	Fields     []Schema    `json:"fields,omitempty"`
+}
+
+func (s *Schema) Type() string {
+	switch s.SchemaType.(type) {
+	case string:
+		return s.SchemaType.(string)
+	case []interface{}:
+		return UnionType
+	default:
+		fmt.Printf("%T\n", s.SchemaType)
+		return "unknown"
+	}
 }
 
 type Boolean bool

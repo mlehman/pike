@@ -34,6 +34,9 @@ var avroPrimitiveCases = []testCase{
 		in:  []byte{0x2},
 		out: Int(1)},
 	{
+		in:  []byte{0x4},
+		out: Int(2)},
+	{
 		in:  []byte{0x0},
 		out: Long(0)},
 	{
