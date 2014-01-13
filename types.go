@@ -1,5 +1,14 @@
 package pike
 
+type MetaData map[string][]byte
+
+type Schema struct {
+	Type      string   `json:"type"`
+	Name      string   `json:"name,omitempty"`
+	Namespace string   `json:"namespace,omitempty"`
+	Fields    []Schema `json:"fields,omitempty"`
+}
+
 type Boolean bool
 type Int int32
 type Long int64

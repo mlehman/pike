@@ -2,15 +2,79 @@ package pike
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
-	//"fmt"
 	"io"
 	"math"
 )
 
 var (
+	Magic               = [...]byte{'O', 'b', 'j', 0x1}
+	MetaDataCodec       = "avro.codec"
+	MetaDataSchema      = "avro.schema"
+	ErrorNotDataFile    = errors.New("not a data file")
 	ErrorInvalidBoolean = errors.New("invalid value for boolean")
 )
+
+type AvroReader struct {
+	binaryReader BinaryReader
+	MetaData     MetaData
+	Schema       Schema
+	Codec        string
+	SyncMarker   [16]byte
+}
+
+func NewReader(br BinaryReader) (ar *AvroReader, err error) {
+	ar = &AvroReader{binaryReader: br}
+	err = ar.initialize()
+	return
+}
+
+func (r *AvroReader) initialize() (err error) {
+	magic := make([]byte, len(Magic), len(Magic))
+	if _, err = io.ReadFull(r.binaryReader, magic); err != nil {
+		return ErrorNotDataFile
+	}
+	for i, v := range magic {
+		if v != Magic[i] {
+			return ErrorNotDataFile
+		}
+	}
+
+	var count Long
+	var key String
+	var val Bytes
+	if err = count.read(r.binaryReader); err != nil {
+		return err
+	}
+	r.MetaData = make(MetaData)
+	for ; count > 0; count-- {
+		if err = key.read(r.binaryReader); err != nil {
+			return err
+		}
+		if err = val.read(r.binaryReader); err != nil {
+			return err
+		}
+		r.MetaData[string(key)] = val
+	}
+
+	syncMarker := make([]byte, len(r.SyncMarker), len(r.SyncMarker))
+	if _, err = io.ReadFull(r.binaryReader, syncMarker); err != nil {
+		return err
+	}
+	copy(r.SyncMarker[:], syncMarker)
+
+	r.Codec = string(r.MetaData[MetaDataCodec])
+	if err = json.Unmarshal(r.MetaData[MetaDataSchema], &r.Schema); err != nil {
+		return err
+	}
+
+	return
+}
+
+func (r *AvroReader) ReadRecord() (interface{}, error) {
+	return nil, io.EOF
+}
 
 type BinaryReader interface {
 	io.ByteReader
@@ -104,7 +168,7 @@ func (s *String) read(reader BinaryReader) (err error) {
 
 func (s *String) value() interface{} { return *s }
 
-func readArray(r BinaryReader, tr TypeReader, add func(interface{})) (err error) {
+func readArray(r BinaryReader, tr TypeReader, add func(TypeReader)) (err error) {
 	var count Long
 	for err = count.read(r); err == nil && count > 0; err = count.read(r) {
 		for ; count > 0; count-- {
@@ -118,49 +182,49 @@ func readArray(r BinaryReader, tr TypeReader, add func(interface{})) (err error)
 }
 
 func (array *BooleanArray) read(r BinaryReader) (err error) {
-	err = readArray(r, new(Boolean), func(tr interface{}) { *array = append(*array, *tr.(*Boolean)) })
+	err = readArray(r, new(Boolean), func(tr TypeReader) { *array = append(*array, tr.value().(Boolean)) })
 	return err
 }
 
 func (a *BooleanArray) value() interface{} { return *a }
 
 func (array *IntArray) read(r BinaryReader) (err error) {
-	err = readArray(r, new(Int), func(tr interface{}) { *array = append(*array, *tr.(*Int)) })
+	err = readArray(r, new(Int), func(tr TypeReader) { *array = append(*array, tr.value().(Int)) })
 	return err
 }
 
 func (a *IntArray) value() interface{} { return *a }
 
 func (array *LongArray) read(r BinaryReader) (err error) {
-	err = readArray(r, new(Long), func(tr interface{}) { *array = append(*array, *tr.(*Long)) })
+	err = readArray(r, new(Long), func(tr TypeReader) { *array = append(*array, tr.value().(Long)) })
 	return err
 }
 
 func (a *LongArray) value() interface{} { return *a }
 
 func (array *FloatArray) read(r BinaryReader) (err error) {
-	err = readArray(r, new(Float), func(tr interface{}) { *array = append(*array, *tr.(*Float)) })
+	err = readArray(r, new(Float), func(tr TypeReader) { *array = append(*array, tr.value().(Float)) })
 	return err
 }
 
 func (a *FloatArray) value() interface{} { return *a }
 
 func (array *DoubleArray) read(r BinaryReader) (err error) {
-	err = readArray(r, new(Double), func(tr interface{}) { *array = append(*array, *tr.(*Double)) })
+	err = readArray(r, new(Double), func(tr TypeReader) { *array = append(*array, tr.value().(Double)) })
 	return err
 }
 
 func (a *DoubleArray) value() interface{} { return *a }
 
 func (array *BytesArray) read(r BinaryReader) (err error) {
-	err = readArray(r, new(Bytes), func(tr interface{}) { *array = append(*array, *tr.(*Bytes)) })
+	err = readArray(r, new(Bytes), func(tr TypeReader) { *array = append(*array, tr.value().(Bytes)) })
 	return err
 }
 
 func (a *BytesArray) value() interface{} { return *a }
 
 func (array *StringArray) read(r BinaryReader) (err error) {
-	err = readArray(r, new(String), func(tr interface{}) { *array = append(*array, *tr.(*String)) })
+	err = readArray(r, new(String), func(tr TypeReader) { *array = append(*array, tr.value().(String)) })
 	return err
 }
 
