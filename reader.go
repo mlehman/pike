@@ -131,7 +131,9 @@ func (r *AvroReader) ReadRecord() (record Record, err error) {
 
 	}
 	r.blockRemaining--
-	return r.Schema.readRecord(r.blockReader)
+	rr := recordReader{schema: &r.Schema}
+	err = rr.read(r.blockReader)
+	return rr.record, err
 }
 
 type BinaryReader interface {
@@ -316,9 +318,82 @@ func readMap(r BinaryReader, key TypeReader, val TypeReader, add func(TypeReader
 	return err
 }
 
-func (s *Schema) read(r BinaryReader) (val interface{}, err error) {
+type unionReader struct {
+	u      Union
+	schema *Schema
+}
+
+func (ur *unionReader) read(r BinaryReader) (err error) {
+	var index Long
+	if err = index.read(r); err == nil {
+		us := ur.schema.SchemaType.UnionSchemaTypes[index]
+		var tr TypeReader
+		if tr, err = us.createReader(); err == nil {
+			err = tr.read(r)
+			ur.u = tr.value()
+		}
+	}
+	return
+}
+
+func (ur *unionReader) value() interface{} { return ur.u }
+
+type mapReader struct {
+	m      Map
+	schema *Schema
+}
+
+func (mr *mapReader) read(r BinaryReader) (err error) {
+	mr.m = make(Map)
 	var tr TypeReader
-	switch s.Type() {
+	if tr, err = mr.schema.SchemaType.ComplexTypeSchema.Values.createReader(); err == nil {
+		err = readMap(r, new(String), tr,
+			func(key TypeReader, val TypeReader) {
+				mr.m[string(key.value().(String))] = val.value()
+			})
+	}
+	return err
+}
+
+func (mr *mapReader) value() interface{} { return mr.m }
+
+type recordArrayReader struct {
+	recordArray RecordArray
+	schema      *Schema
+}
+
+func (rar *recordArrayReader) read(r BinaryReader) (err error) {
+	rar.recordArray = make(RecordArray, 0)
+	return readArray(r, &recordReader{make(Record), rar.schema.SchemaType.ComplexTypeSchema.Items},
+		func(tr TypeReader) { rar.recordArray = append(rar.recordArray, tr.value().(Record)) })
+}
+
+func (rar *recordArrayReader) value() interface{} { return rar.recordArray }
+
+type recordReader struct {
+	record Record
+	schema *Schema
+}
+
+func (rr *recordReader) read(r BinaryReader) (err error) {
+	rr.record = make(Record)
+	for _, field := range rr.schema.Fields {
+		var tr TypeReader
+		if tr, err = field.createReader(); err != nil {
+			return err
+		}
+		if err = tr.read(r); err != nil {
+			return err
+		}
+		rr.record[field.Name] = tr.value()
+	}
+	return
+}
+
+func (rr *recordReader) value() interface{} { return rr.record }
+
+func (st *SchemaType) createReader() (tr TypeReader, err error) {
+	switch st.Type {
 	case IntType:
 		tr = new(Int)
 	case LongType:
@@ -326,22 +401,32 @@ func (s *Schema) read(r BinaryReader) (val interface{}, err error) {
 	case StringType:
 		tr = new(String)
 	default:
-		return val, errors.New("unknown type:" + s.Type())
+		err = errors.New("schema type unable to read unsupported type " + st.Type)
 	}
-	if err = tr.read(r); err == nil {
-		val = tr.value()
-	}
-	return val, err
+	return tr, err
 }
 
-func (s *Schema) readRecord(r BinaryReader) (record Record, err error) {
-	record = make(Record)
-	for _, field := range s.Fields {
-		var val interface{}
-		if val, err = field.read(r); err != nil {
-			return record, err
+func (s *Schema) createReader() (tr TypeReader, err error) {
+	if s.SchemaType.Primitive() {
+		tr, err = s.SchemaType.createReader()
+	} else {
+		switch s.SchemaType.Type {
+		case ArrayType:
+			switch s.SchemaType.ComplexTypeSchema.Items.SchemaType.Type {
+			case RecordType:
+				tr = &recordArrayReader{schema: s}
+			default:
+				err = errors.New("schema unable to read unsupported array type " + s.SchemaType.Type)
+			}
+		case UnionType:
+			tr = &unionReader{schema: s}
+		case MapType:
+			tr = &mapReader{schema: s}
+		case RecordType:
+			tr = &recordReader{schema: s}
+		default:
+			err = errors.New("schema unable to read unsupported type " + s.SchemaType.Type)
 		}
-		record[field.Name] = val
 	}
-	return
+	return tr, err
 }
